@@ -882,3 +882,19 @@ function getAutoAreaCategories_() {
   if (!v) return CONFIG.AUTO_AREA_CATEGORIES;
   return v.split(',').map(function (s) { return s.trim(); });
 }
+
+// ===== セットアップユーティリティ =====
+// WebアプリURL（全員アクセス可・匿名含む）をスクリプトプロパティに設定する
+function setWebappUrl() {
+  PropertiesService.getScriptProperties()
+    .setProperty('WEBAPP_URL', 'https://script.google.com/macros/s/AKfycby6F8KFRNv3k3wVxPYNrEL-7ODcAhWU3tg9BFlKi5q3Dr6vXBgnA1u0GRNMjtyH_9U/exec');
+  Logger.log('WEBAPP_URL設定完了');
+}
+
+// KintoneのAPIトークンをスクリプトプロパティに設定する（App212: ToDo受信メール / App75: エリア表）
+function setKintoneTokens() {
+  const p = PropertiesService.getScriptProperties();
+  p.setProperty('KINTONE_TOKEN_TODO', '<App212のAPIトークン>');
+  p.setProperty('KINTONE_TOKEN_AREA', '<App75のAPIトークン>');
+  Logger.log('Kintoneトークン設定完了');
+}
