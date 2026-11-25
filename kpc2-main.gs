@@ -6,11 +6,11 @@
 const CONFIG = {
   KINTONE_DOMAIN: 'erima.cybozu.com',
   APP: {
-    CUSTOMER: 178,   // ☆顧客・担当マスタ
-    PROJECT: 180,    // ☆案件管理
-    QUOTE: 182,      // ☆見積管理（元 ☆営業管理（見積書））
-    TODO: 212,       // ToDo受信メール（KPC2ハブ）
-    AREA: 75,        // エリア表作成指示
+    CUSTOMER: 178, // ☆顧客・担当マスタ
+    PROJECT: 180,  // ☆案件管理
+    QUOTE: 182,    // ☆見積管理（元 ☆営業管理（見積書））
+    TODO: 212,     // ToDo受信メール（KPC2ハブ）
+    AREA: 75,      // エリア表作成指示（旧方式・後方互換のため残す）
   },
   CLAUDE_MODEL: 'claude-haiku-5-5',
   CLAUDE_EFFORT: 'low',
@@ -28,7 +28,7 @@ const CONFIG = {
   URL_EXPIRE_DAYS: 7,
   STAFF: [
     { name: '加藤', code: 'kato@erima.co' },
-    { name: '森', code: 'mori@erima.co' },
+    { name: '森',   code: 'mori@erima.co' },
     { name: '亀井', code: 'kamei' },
     { name: '坪佐', code: 'tsubosa@gmail.com' },
   ],
@@ -108,14 +108,14 @@ const CONFIG = {
       gmailId: 'gmail_id',
       rfcId: 'rfc_id',
       mailbox: 'mailbox',
-      status: 'status',           // 未対応 / 対応中 / 完了 / スキップ
-      category: 'category',       // AIが判断したカテゴリ
-      summary: 'summary',         // AI要約
-      action: 'action',           // AIの推奨アクション
-      areaStatus: 'area_status',  // エリア表: 処理中 / 要確認 / 完了 / 失敗
-      areaQuestion: 'area_question', // 要確認の場合の質問
-      areaAnswer: 'area_answer',  // 加藤さんの回答
-      areaRecordId: 'area_record_id', // エリア表作成指示のレコードID
+      status: 'status',      // 未対応 / 対応中 / 完了 / スキップ
+      category: 'category',  // AIが判断したカテゴリ
+      summary: 'summary',    // AI要約
+      action: 'action',      // AIの推奨アクション
+      areaStatus:   'area_status',   // エリア表: 作成待ち / 作業中 / 完了 / 失敗 / 要確認
+      areaQuestion: 'area_question', // 要確認の質問 / 完了時の説明
+      areaAnswer:   'area_answer',   // 加藤さんの回答
+      areaRecordId: 'area_record_id',// （旧方式互換）
     },
   },
   PROJECT_DEFAULTS: {
@@ -183,9 +183,9 @@ function doGet(e) {
 
 function doPost(e) {
   try {
-    const body = JSON.parse(e.postData.contents || '{}');
-    const action = body.action || '';
-    const secret = body.secret || '';
+    const body    = JSON.parse(e.postData.contents || '{}');
+    const action  = body.action  || '';
+    const secret  = body.secret  || '';
     const payload = body.payload || {};
 
     // kintone Webhookからのリクエスト
@@ -206,6 +206,11 @@ function doPost(e) {
     if (action === 'todoAreaAnswer') {
       return handleAreaAnswer_(payload);
     }
+
+    // ===== KPC2 ジョブキュー API（09_area_request.gs） =====
+    // areaNext / areaDone / areaFail / areaAsk の認証チェックは各ハンドラで行う
+    const areaRes = routeAreaAction_(action, payload, secret);
+    if (areaRes) return areaRes;
 
     // 疎通確認
     if (action === 'ping') {
@@ -428,18 +433,18 @@ function createTodoRecord_(payload, analysis) {
   const token = prop_('KINTONE_TOKEN_TODO');
 
   const record = {
-    subject: { value: subject || '' },
-    from: { value: from || '' },
-    to: { value: to || '' },
-    date: { value: date || '' },
-    body: { value: body ? body.slice(0, 10000) : '' },
-    gmail_id: { value: gmailId || '' },
-    rfc_id: { value: rfcId || '' },
-    mailbox: { value: mailbox || '' },
-    status: { value: '未対応' },
+    subject:  { value: subject  || '' },
+    from:     { value: from     || '' },
+    to:       { value: to       || '' },
+    date:     { value: date     || '' },
+    body:     { value: body ? body.slice(0, 10000) : '' },
+    gmail_id: { value: gmailId  || '' },
+    rfc_id:   { value: rfcId    || '' },
+    mailbox:  { value: mailbox  || '' },
+    status:   { value: '未対応' },
     category: { value: analysis.category || 'その他' },
-    summary: { value: analysis.summary || '' },
-    action: { value: analysis.action || '確認のみ' },
+    summary:  { value: analysis.summary  || '' },
+    action:   { value: analysis.action   || '確認のみ' },
   };
 
   const res = UrlFetchApp.fetch('https://' + CONFIG.KINTONE_DOMAIN + '/k/v1/record.json', {
@@ -461,8 +466,8 @@ function updateTodoAreaStatus_(todoId, areaStatus, areaRecordId, areaQuestion) {
   const record = {
     area_status: { value: areaStatus },
   };
-  if (areaRecordId) record.area_record_id = { value: String(areaRecordId) };
-  if (areaQuestion) record.area_question = { value: areaQuestion };
+  if (areaRecordId)  record.area_record_id = { value: String(areaRecordId) };
+  if (areaQuestion)  record.area_question  = { value: areaQuestion };
 
   const res = UrlFetchApp.fetch('https://' + CONFIG.KINTONE_DOMAIN + '/k/v1/record.json', {
     method: 'put',
@@ -478,136 +483,25 @@ function updateTodoAreaStatus_(todoId, areaStatus, areaRecordId, areaQuestion) {
   return json;
 }
 
-// ===== エリア表作成 =====
+// ===== エリア表作成（新方式：ジョブキュー経由） =====
+// 09_area_request.gs の enqueueAreaJob_ に委譲する。
+// 旧方式（App 75 直接作成）は削除済み。
 
 function triggerAreaCreation_(todoId, payload, analysis) {
-  console.log('エリア表作成開始: todoId=' + todoId);
-  updateTodoAreaStatus_(todoId, '処理中', null, null);
-
-  // エリア表作成指示(App 75)にレコードを作成
-  const token = prop_('KINTONE_TOKEN_AREA');
-
-  // まず顧客情報をClaude+kintoneで取得
-  const customerInfo = resolveCustomer_(analysis.customerName, payload.from);
-
-  // エリア表作成指示を2段階Claudeで生成
-  const areaSpec = generateAreaSpec_(payload, analysis, customerInfo);
-
-  if (areaSpec.needsQuestion) {
-    // 追加情報が必要
-    updateTodoAreaStatus_(todoId, '要確認', null, areaSpec.question);
-    console.log('要確認:', areaSpec.question);
-    return;
-  }
-
-  // App 75にレコード作成
-  const areaRecord = {
-    // ※ App 75の実際のフィールドコードは確認が必要
-    // 以下は仮のフィールドコード
-    title: { value: areaSpec.title || payload.subject || '' },
-    customer: { value: areaSpec.customerName || '' },
-    contact: { value: areaSpec.contactName || '' },
-    detail: { value: areaSpec.detail || '' },
-    source_todo_id: { value: String(todoId) },
-  };
-
-  const res = UrlFetchApp.fetch('https://' + CONFIG.KINTONE_DOMAIN + '/k/v1/record.json', {
-    method: 'post',
-    headers: {
-      'X-Cybozu-API-Token': token,
-      'Content-Type': 'application/json',
-    },
-    payload: JSON.stringify({ app: CONFIG.APP.AREA, record: areaRecord }),
-    muteHttpExceptions: true,
-  });
-  const json = JSON.parse(res.getContentText());
-  if (json.code) throw new Error('エリア表作成指示登録エラー: ' + json.message);
-
-  updateTodoAreaStatus_(todoId, '処理中', json.id, null);
-  console.log('エリア表作成指示登録完了: areaId=' + json.id);
-}
-
-function resolveCustomer_(customerName, fromEmail) {
-  if (!customerName) return null;
-  try {
-    const token = prop_('KINTONE_TOKEN_CUSTOMER');
-    const query = 'name = "' + customerName + '"';
-    const records = kintoneGetRecords_(CONFIG.APP.CUSTOMER, token, query, null, 1);
-    return records.length > 0 ? records[0] : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-function generateAreaSpec_(payload, analysis, customerInfo) {
-  const prompt = `エリア表作成システムのAIです。
-以下のメール情報から、エリア表作成指示のための情報を抽出してください。
-
-【メール】
-差出人: ${payload.from}
-件名: ${payload.subject}
-本文:
-${(payload.body || '').slice(0, 2000)}
-
-【AI分析結果】
-カテゴリ: ${analysis.category}
-推定顧客名: ${analysis.customerName || 'なし'}
-${customerInfo ? '【顧客マスタ情報】\n会社名: ' + (customerInfo.name && customerInfo.name.value || '') : '（顧客情報なし）'}
-
-以下をJSON形式で回答してください：
-{
-  "needsQuestion": false または true（情報が足りない場合true）,
-  "question": "追加で確認すべきこと（needsQuestion=trueの場合）",
-  "title": "エリア表タイトル",
-  "customerName": "顧客名",
-  "contactName": "担当者名",
-  "detail": "エリア表作成の詳細指示"
-}
-
-JSONのみ回答。コードブロックなし。`;
-
-  try {
-    const apiKey = prop_('CLAUDE_API_KEY');
-    const res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
-      method: 'post',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      payload: JSON.stringify({
-        model: CONFIG.CLAUDE_MODEL,
-        max_tokens: 2000,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-      muteHttpExceptions: true,
-    });
-    const json = JSON.parse(res.getContentText());
-    if (json.error) throw new Error(json.error.message);
-    const text = json.content[0].text;
-    return JSON.parse(text);
-  } catch (err) {
-    return {
-      needsQuestion: false,
-      title: payload.subject || '',
-      customerName: analysis.customerName || '',
-      contactName: analysis.personName || '',
-      detail: (payload.body || '').slice(0, 500),
-    };
-  }
+  console.log('エリア表作成開始（キュー経由）: todoId=' + todoId);
+  enqueueAreaJob_(todoId, payload, analysis, 'お客様メール');
 }
 
 // ===== エリア表回答処理（kintoneからWebhook or kintone JS経由） =====
+// 09_area_request.gs の reenqueueAreaJob_ に委譲する。
 
 function handleAreaAnswer_(payload) {
-  // kintone JSのerima-todo.jsから「この回答で再依頼する」ボタンで呼ばれる
   const { recordId, answer, user } = payload;
   if (!recordId || !answer) {
     return jsonResponse_({ ok: false, message: 'recordId と answer が必要です' });
   }
-
   try {
-    // ToDoレコードにanswerを保存
+    // area_answer フィールドに回答を保存
     const token = prop_('KINTONE_TOKEN_TODO');
     const updateRes = UrlFetchApp.fetch('https://' + CONFIG.KINTONE_DOMAIN + '/k/v1/record.json', {
       method: 'put',
@@ -615,31 +509,15 @@ function handleAreaAnswer_(payload) {
       payload: JSON.stringify({
         app: CONFIG.APP.TODO,
         id: recordId,
-        record: {
-          area_answer: { value: answer },
-          area_status: { value: '処理中' },
-        },
+        record: { area_answer: { value: answer } },
       }),
       muteHttpExceptions: true,
     });
     const updateJson = JSON.parse(updateRes.getContentText());
     if (updateJson.code) throw new Error(updateJson.message);
 
-    // ToDoレコードを再取得して処理を再開
-    const getRes = UrlFetchApp.fetch(
-      'https://' + CONFIG.KINTONE_DOMAIN + '/k/v1/record.json?app=' + CONFIG.APP.TODO + '&id=' + recordId,
-      { headers: { 'X-Cybozu-API-Token': token }, muteHttpExceptions: true }
-    );
-    const todoRecord = JSON.parse(getRes.getContentText()).record;
-
-    // エリア表作成指示を更新して再処理
-    const areaRecordId = todoRecord.area_record_id && todoRecord.area_record_id.value;
-    if (areaRecordId) {
-      retryAreaCreation_(recordId, areaRecordId, answer, todoRecord);
-    } else {
-      // 新規エリア表作成指示
-      retryAreaCreationNew_(recordId, answer, todoRecord);
-    }
+    // area_asking から取り出してキューに再投入
+    reenqueueAreaJob_(recordId, answer);
 
     return jsonResponse_({ ok: true, message: '回答を受け取り、エリア表作成を再開しました' });
   } catch (err) {
@@ -648,60 +526,7 @@ function handleAreaAnswer_(payload) {
   }
 }
 
-function retryAreaCreation_(todoId, areaRecordId, answer, todoRecord) {
-  // 既存のエリア表作成指示レコードに回答を追記して更新
-  const token = prop_('KINTONE_TOKEN_AREA');
-  const areaGetRes = UrlFetchApp.fetch(
-    'https://' + CONFIG.KINTONE_DOMAIN + '/k/v1/record.json?app=' + CONFIG.APP.AREA + '&id=' + areaRecordId,
-    { headers: { 'X-Cybozu-API-Token': token }, muteHttpExceptions: true }
-  );
-  const areaRecord = JSON.parse(areaGetRes.getContentText()).record;
-  const currentDetail = areaRecord.detail && areaRecord.detail.value || '';
-  const newDetail = currentDetail + '\n\n【追加回答】' + answer;
-
-  const updateRes = UrlFetchApp.fetch('https://' + CONFIG.KINTONE_DOMAIN + '/k/v1/record.json', {
-    method: 'put',
-    headers: { 'X-Cybozu-API-Token': token, 'Content-Type': 'application/json' },
-    payload: JSON.stringify({
-      app: CONFIG.APP.AREA,
-      id: areaRecordId,
-      record: { detail: { value: newDetail } },
-    }),
-    muteHttpExceptions: true,
-  });
-  const updateJson = JSON.parse(updateRes.getContentText());
-  if (updateJson.code) throw new Error(updateJson.message);
-
-  // ToDoのステータス更新
-  updateTodoAreaStatus_(todoId, '処理中', areaRecordId, null);
-  console.log('エリア表作成指示を更新して再処理: areaId=' + areaRecordId);
-}
-
-function retryAreaCreationNew_(todoId, answer, todoRecord) {
-  // 新規でエリア表作成指示を作成
-  const subject = todoRecord.subject && todoRecord.subject.value || '';
-  const body = todoRecord.body && todoRecord.body.value || '';
-  const token = prop_('KINTONE_TOKEN_AREA');
-
-  const areaRecord = {
-    title: { value: subject },
-    detail: { value: body.slice(0, 500) + '\n\n【追加回答】' + answer },
-    source_todo_id: { value: String(todoId) },
-  };
-
-  const res = UrlFetchApp.fetch('https://' + CONFIG.KINTONE_DOMAIN + '/k/v1/record.json', {
-    method: 'post',
-    headers: { 'X-Cybozu-API-Token': token, 'Content-Type': 'application/json' },
-    payload: JSON.stringify({ app: CONFIG.APP.AREA, record: areaRecord }),
-    muteHttpExceptions: true,
-  });
-  const json = JSON.parse(res.getContentText());
-  if (json.code) throw new Error(json.message);
-
-  updateTodoAreaStatus_(todoId, '処理中', json.id, null);
-}
-
-// ===== エリア表完了/失敗 Webhook（App 75からのWebhook） =====
+// ===== kintone Webhook（App 75 後方互換） =====
 
 function handleKintoneWebhook_(e) {
   // kintone Webhookからのリクエスト（App 75の状態変化）
@@ -712,20 +537,20 @@ function handleKintoneWebhook_(e) {
 
   try {
     const body = JSON.parse(e.postData.contents || '{}');
-    const record = body.record || {};
-    const areaStatus = record.status && record.status.value || '';
-    const todoId = record.source_todo_id && record.source_todo_id.value || '';
-    const areaId = record.$id && record.$id.value || '';
+    const record    = body.record || {};
+    const areaStatus = record.status          && record.status.value          || '';
+    const todoId     = record.source_todo_id  && record.source_todo_id.value  || '';
+    const areaId     = record.$id             && record.$id.value             || '';
 
     if (!todoId) return jsonResponse_({ ok: true, message: 'source_todo_id なし、スキップ' });
 
     if (areaStatus === '完了') {
       updateTodoAreaStatus_(todoId, '完了', areaId, null);
-      console.log('エリア表完了通知: todoId=' + todoId + ', areaId=' + areaId);
+      console.log('エリア表完了通知（旧方式）: todoId=' + todoId + ', areaId=' + areaId);
     } else if (areaStatus === '失敗') {
       const errorMsg = record.error_message && record.error_message.value || '';
       updateTodoAreaStatus_(todoId, '失敗', areaId, errorMsg);
-      console.log('エリア表失敗通知: todoId=' + todoId);
+      console.log('エリア表失敗通知（旧方式）: todoId=' + todoId);
     }
 
     return jsonResponse_({ ok: true });
@@ -785,12 +610,12 @@ function scanMailbox() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) return;
   try {
-    const label = GmailApp.getUserLabelByName(CONFIG.LABEL_DONE) || GmailApp.createLabel(CONFIG.LABEL_DONE);
-    const props = PropertiesService.getScriptProperties();
+    const label   = GmailApp.getUserLabelByName(CONFIG.LABEL_DONE) || GmailApp.createLabel(CONFIG.LABEL_DONE);
+    const props   = PropertiesService.getScriptProperties();
     const mailbox = Session.getEffectiveUser().getEmail();
     const threads = GmailApp.search(CONFIG.GMAIL_QUERY, 0, 30);
-    const since = Math.max(Number(props.getProperty('START_AT')) || 0, Date.now() - 2 * 24 * 60 * 60 * 1000);
-    const done = loadDoneIds_(props);
+    const since   = Math.max(Number(props.getProperty('START_AT')) || 0, Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const done    = loadDoneIds_(props);
     let count = 0;
 
     for (let t = 0; t < threads.length && count < CONFIG.MAX_MAILS_PER_RUN; t++) {
@@ -800,9 +625,9 @@ function scanMailbox() {
         const mid = msg.getId();
         if (done[mid] || props.getProperty('p_' + mid)) continue;
 
-        const from = msg.getFrom() || '';
+        const from      = msg.getFrom() || '';
         const fromLower = from.toLowerCase();
-        const skip = msg.getDate().getTime() < since ||
+        const skip      = msg.getDate().getTime() < since ||
           fromLower.indexOf(mailbox.toLowerCase()) >= 0 ||
           CONFIG.SKIP_FROM.some(function (s) { return fromLower.indexOf(s) >= 0; });
 
@@ -825,32 +650,32 @@ function scanMailbox() {
 }
 
 function buildMailPayload_(msg, mailbox) {
-  let body = msg.getPlainBody() || '';
+  let body      = msg.getPlainBody() || '';
   let truncated = false;
   if (body.length > CONFIG.MAX_BODY_CHARS) {
     body = body.slice(0, CONFIG.MAX_BODY_CHARS);
     truncated = true;
   }
   const attachments = [];
-  const skipped = [];
+  const skipped     = [];
   msg.getAttachments({ includeInlineImages: false }).forEach(function (a) {
     const type = a.getContentType();
-    const ok = type === 'application/pdf' || /^image\/(jpeg|png|gif|webp)$/.test(type);
-    if (!ok) { skipped.push(a.getName() + ' (形式対象外)'); return; }
+    const ok   = type === 'application/pdf' || /^image\/(jpeg|png|gif|webp)$/.test(type);
+    if (!ok)                              { skipped.push(a.getName() + ' (形式対象外)'); return; }
     if (a.getSize() > CONFIG.MAX_ATTACH_BYTES) { skipped.push(a.getName() + ' (大きすぎ)'); return; }
     attachments.push({ name: a.getName(), mimeType: type, base64: Utilities.base64Encode(a.getBytes()) });
   });
   return {
-    mailbox: mailbox,
-    gmailId: msg.getId(),
-    rfcId: msg.getHeader('Message-ID') || msg.getId(),
-    from: msg.getFrom(),
-    to: msg.getTo(),
-    date: Utilities.formatDate(msg.getDate(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
-    subject: msg.getSubject(),
-    body: body,
-    bodyTruncated: truncated,
-    attachments: attachments,
+    mailbox:            mailbox,
+    gmailId:            msg.getId(),
+    rfcId:              msg.getHeader('Message-ID') || msg.getId(),
+    from:               msg.getFrom(),
+    to:                 msg.getTo(),
+    date:               Utilities.formatDate(msg.getDate(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm'),
+    subject:            msg.getSubject(),
+    body:               body,
+    bodyTruncated:      truncated,
+    attachments:        attachments,
     skippedAttachments: skipped,
   };
 }
@@ -861,7 +686,7 @@ function notifyError_(context, err) {
   console.error('[ERROR] ' + context + ': ' + err.message + '\n' + (err.stack || ''));
   try {
     const cwToken = propOrEmpty_('CW_TOKEN');
-    const cwRoom = propOrEmpty_('CW_ROOM_ORDER');
+    const cwRoom  = propOrEmpty_('CW_ROOM_ORDER');
     if (!cwToken || !cwRoom) return;
     const msg = '[KPC2エラー] ' + context + '\n' + err.message.slice(0, 200);
     UrlFetchApp.fetch('https://api.chatwork.com/v2/rooms/' + cwRoom + '/messages', {
@@ -884,6 +709,7 @@ function getAutoAreaCategories_() {
 }
 
 // ===== セットアップユーティリティ =====
+
 // WebアプリURL（全員アクセス可・匿名含む）をスクリプトプロパティに設定する
 function setWebappUrl() {
   PropertiesService.getScriptProperties()
