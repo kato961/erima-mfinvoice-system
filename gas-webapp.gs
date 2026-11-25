@@ -33,8 +33,8 @@ function getMfOAuthService() {
   const clientId     = props.getProperty('MF_CLIENT_ID');
   const clientSecret = props.getProperty('MF_CLIENT_SECRET');
   return OAuth2.createService('moneyforward')
-    .setAuthorizationBaseUrl('https://invoice.moneyforward.com/oauth/authorize')
-    .setTokenUrl('https://invoice.moneyforward.com/oauth/token')
+    .setAuthorizationBaseUrl('app.moneyforward.com/oauth/authorize')
+    .setTokenUrl('app.moneyforward.com/oauth/token')
     .setClientId(clientId)
     .setClientSecret(clientSecret)
     .setCallbackFunction('authCallback')
